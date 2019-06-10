@@ -1,0 +1,151 @@
+---
+title:  "Data analysis procedure"
+author: "Kingofive"
+---
+
+```{r basic_setting}
+source("settings.R") # Any predefined functions are stored in this file
+raw_data <- read.csv("Data_set.csv", header = T)
+```
+
+# 1. Data preprocessing
+Omitted for briefness. Whole details are written in "settings.R" file.
+
+# 2. Fit interpretable model
+
+## 2-1. Significance of Derived variables
+```{r derived_not_added}
+# Apply data correction procedure only
+not_included <- raw_data %>% 
+  logical_match() %>% 
+  scaling_column() %>% 
+  rephrase_date() %>% 
+  trivials()
+```
+
+```{r derived_added}
+# Apply data correction and add derived variables
+included <- not_included %>% 
+  add_intuitive() %>% 
+  add_chisquare()
+```
+
+```{r prepare_evaluation1}
+cutoff_points       <- seq(0.1, 0.3, by = 0.01) # cutoff points to evaluate
+notincluded_stroage <- matrix(0, nrow = length(cutoff_points), ncol = 10)
+included_stroage    <- matrix(0, nrow = length(cutoff_points), ncol = 10)
+```
+
+```{r evaluate_when_not_added}
+# 1. Randomly split the data which does not include derived variables
+# 2. Fit LASSO-penalized logistic regression
+# 3. Record test F1 score
+for(i in 1:10){
+  resampler(not_included, 0.7) 
+  notincluded_stroage[, i] <- performance_tester_LASSO(train_data, test_data, FALSE)
+}
+```
+
+```{r evaluate_when_added}
+# 1. Randomly split the data which includes derived variables
+# 2. Fit LASSO-penalized logistic regression
+# 3. Record test F1 score
+for(i in 1:10){
+  resampler(included, 0.7) 
+  included_stroage[, i] <- performance_tester_LASSO(train_data, test_data, FALSE)
+}
+```
+
+## 2-2. Justification on Boosting method
+```{r prepare_evaluation2}
+cutoff_points       <- seq(0.1, 0.3, by = 0.01) # cutoff points to evaluate
+LASSO_stroage       <- vector("list", 10)
+Boosting_stroage    <- vector("list", 10)
+```
+
+```{r evaluate_LASSO}
+# 1. Randomly split the data which includes derived variables
+# 2. Fit LASSO-penalized logistic regression
+# 3. Record test F1 score with best cutoff point and selected variables
+for(i in 1:10){
+  resampler(included, 0.7)
+  LASSO_stroage[[i]] <- performance_tester_LASSO(train_data, test_data, TRUE)
+}
+```
+
+```{r evaluate_Boosting}
+# 1. Randomly split the data which includes derived variables
+# 2. Fit LASSO-penalized logistic regression
+# 3. Record test F1 score with best cutoff point and selected variables
+for(i in 1:10){
+  resampler(included, 0.7) 
+  Boosting_stroage[[i]] <- performance_tester_Boosting(train_data, test_data, TRUE)
+}
+```
+
+# 3. Fit predictive model
+
+## 3-1. Fit Random Forest
+```{r fit_RF}
+trained_RF <- randomForest(factor(TARGET) ~ . - CUST_ID,
+                           data = train_data,
+                           family = 'binomial',
+                           ntree = 500,
+                           mtry = 7)
+
+# Obtain single F1 score of randomForest model
+pred_RF <- predict(trained_RF, newdata = test_data, type='class')
+F1_RF   <- getF1score(confusionMatrix(pred_RF, test_data$TARGET))
+```
+
+
+## 3-2. Fit Support Vector Machine
+```{r fit_SVM}
+# Omitted parameter tuning process for briefness.
+# In fact every such procedure was done manually, which was extremely inefficient(i.e. drawback of our process).
+trained_SVM <- svm(factor(TARGET) ~ . - CUST_ID,
+                   data = train_data,
+                   kernel = 'radial',
+                   gamma = 1/32,
+                   cost = 3,
+                   class.weights = c('0' = 0.25),
+                   scale = T)
+
+# Obtain single F1 score of Support Vector Machine model
+pred_SVM <- predict(trained_SVM, newdata = test_data, type='class')
+F1_SVM   <- getF1score(confusionMatrix(pred_SVM, test_data$TARGET))
+```
+
+## 3-3. Fit XGBoost
+```{r fit_XGBoost}
+# Omitted parameter tuning process for briefness.
+# In fact every such procedure was done manually, which was extremely inefficient(i.e. drawback of our process).
+param = list(booster = 'gbtree',
+             eta = 0.025,
+             gamma = 0,
+             max_depth = 120,
+             lambda = 1,
+             alpha = 0,
+             objective = 'binary:logistic',
+             eval_metric = f1value)
+
+# Extra data preprocessing procedure: dummy-ize every factor column
+XGdata   <- dummy_processed_data(included)
+n        <- nrow(XGdata)
+traindex <- sample(1:n,0.7*n)
+XGtrain  <- data.matrix(XGdata[index, ])
+XGtest   <- data.matrix(XGdata[-index, ])
+dtrain   <- xgb.DMatrix(XGtrain[, -(1:2)], label = XGtrain[, 2])
+dtest    <- xgb.DMatrix(XGtest[, -(1:2)], label = XGtest[, 2])
+watch    <- list(test = dtest, train = dtrain)
+
+# Train XGBoost model
+trained_XGB  <- xgb.train(params = param,
+                          data = dtrain,
+                          nrounds = 100,
+                          watchlist = watch)
+
+# Obtain single F1 score of XGBoost model
+pred_XGB <- predict(trained_XGB, XGtest[, -(1:2)])
+F1_XGB   <- getF1score(test = XGtest, pred = pred_XGB)
+```
